@@ -1,0 +1,112 @@
+#!/opt/python3/bin/python3
+"""bt-kbmouse: settings of a Bluetooth keyboard with a TrackPoint on the N900 (Python 3 + hildonlite).
+The GUI only edits /home/user/.bt-kbmouse.conf; the service bt-kbmouse-daemon (as root) applies it within a few seconds and shows its state."""
+import os, sys
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+try:
+    import hildonlite as hl
+except ImportError:                       # in the repository: the copy of hildonlite next to this application
+    sys.path.insert(0, os.path.join(HERE, "..", "hildonlite"))
+    import hildonlite as hl
+import bt_kbmouse_conf as C
+
+LAYOUT_NAMES = {"cz": "Czech (QWERTZ)", "us": "US (QWERTY)", "none": "As the keyboard sends"}
+
+
+def read_status():
+    d = {}
+    try:
+        for line in open(C.STATUS):
+            if "=" in line:
+                k, v = line.strip().split("=", 1)
+                d[k] = v
+    except OSError:
+        pass
+    return d
+
+
+def status_text(d):
+    state = d.get("state")
+    if state == "running":
+        return "<b>Active</b>: %s" % (d.get("device") or "keyboard")
+    if state == "waiting":
+        return "<b>Waiting for the keyboard</b>: pair it and press a key to connect"
+    if state == "off":
+        return "<b>Switched off</b>"
+    return "<b>The service is not running</b> (start it: initctl start bt-kbmouse)"
+
+
+def main():
+    if not hl.init():
+        sys.exit("no X display")
+    cfg = C.load()
+    saving = []
+
+    def save_soon(_w=None):
+        """Writes the settings 0.4 s after the last change (a slider reports every step)."""
+        if saving:
+            return
+        saving.append(1)
+
+        def write():
+            saving.clear()
+            cfg["enabled"] = "yes" if enabled.get_active() else "no"
+            cfg["pointer_speed"] = str(int(round(speed.get_value())))
+            cfg["scroll_speed"] = str(int(round(scroll.get_value())))
+            cfg["scroll_invert"] = "yes" if invert.get_active() else "no"
+            cfg["cursor"] = "yes" if cursor.get_active() else "no"
+            cfg["cursor_size"] = str(int(round(size.get_value())))
+            try:
+                C.save(cfg)
+            except OSError as e:
+                hl.Banner(win, "Cannot save the settings: %s" % e)
+            return False
+        hl.timeout(400, write)
+
+    win = hl.Window("Keyboard and mouse")
+    box = hl.VBox(spacing=6)
+    status = box.add(hl.Label("", markup=True, wrap=True))
+    enabled = box.add(hl.CheckButton("Use the Bluetooth keyboard", C.yes(cfg, "enabled"), save_soon))
+
+    def layout_button():
+        return LAYOUT_NAMES.get(cfg["layout"], cfg["layout"])
+
+    def next_layout(_b):
+        i = C.LAYOUTS.index(cfg["layout"]) if cfg["layout"] in C.LAYOUTS else 0
+        cfg["layout"] = C.LAYOUTS[(i + 1) % len(C.LAYOUTS)]
+        layout.set_value(layout_button())
+        save_soon()
+    layout = box.add(hl.Button("Keyboard layout", layout_button(), next_layout))
+
+    box.add(hl.Label("Pointer speed (TrackPoint)", xalign=0.0))
+    speed = box.add(hl.Scale(1, 10, 1, C.number(cfg, "pointer_speed", 1, 10), save_soon))
+    box.add(hl.Label("Scrolling speed (middle button + TrackPoint)", xalign=0.0))
+    scroll = box.add(hl.Scale(1, 10, 1, C.number(cfg, "scroll_speed", 1, 10), save_soon))
+    invert = box.add(hl.CheckButton("Reverse the scrolling direction", C.yes(cfg, "scroll_invert"), save_soon))
+    cursor = box.add(hl.CheckButton("Show the mouse pointer", C.yes(cfg, "cursor"), save_soon))
+    box.add(hl.Label("Pointer size", xalign=0.0))
+    size = box.add(hl.Scale(1, 3, 1, C.number(cfg, "cursor_size", 1, 3), save_soon))
+    box.add(hl.Label("Changes are applied within a few seconds. Right button: most Hildon applications do not use it.", wrap=True, xalign=0.0))
+
+    area = hl.PannableArea()
+    area.add_viewport(box)
+    win.add(area)
+
+    def refresh():
+        status.set_text(status_text(read_status()), markup=True)
+        return True
+    refresh()
+    hl.timeout(2000, refresh)
+
+    menu = hl.AppMenu()
+    menu.add("Quit", lambda b: hl.quit())
+    win.set_menu(menu)
+    win.show()
+    if os.environ.get("BTKBMOUSE_TIMEOUT"):               # self-test / screenshots
+        hl.timeout(int(os.environ["BTKBMOUSE_TIMEOUT"]) * 1000, lambda: hl.quit() or False)
+    hl.main()
+
+
+if __name__ == "__main__":
+    main()

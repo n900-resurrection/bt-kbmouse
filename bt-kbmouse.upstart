@@ -1,0 +1,10 @@
+description "bt-kbmouse: Bluetooth keyboard and TrackPoint service"
+author "elPytel"
+
+# Starts with the X server (the service sets the key map and the pointer in the X session of the user) and is restarted if it dies.
+start on started xomap
+stop on stopped xomap
+
+console none
+respawn
+exec /opt/python3/bin/python3 /opt/bt-kbmouse/bt-kbmouse-daemon

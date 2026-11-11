@@ -1,0 +1,193 @@
+#!/opt/python3/bin/python3
+"""bt-kbmouse service (runs as root, started by upstart): keeps a Bluetooth keyboard with a TrackPoint usable on the N900.
+
+It watches the input devices; when the keyboard is there it starts the splitter (btkbd-split.py: Shift/Caps/AltGr and the layout, the pointer
+with scrolling on the middle button, see DOC/bluetooth-keyboard.md and DOC/mouse.md) and, as the user of the X session, sets the key map, the
+speed of the pointer and the cursor. It starts everything again when the keyboard reconnects and applies a change of the settings file
+(/home/user/.bt-kbmouse.conf, written by the GUI) within a few seconds. Status for the GUI: /tmp/bt-kbmouse.status.
+"""
+import os, signal, subprocess, sys, time
+
+DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, DIR)
+import bt_kbmouse_conf as C
+
+PY = "/opt/python3/bin/python3"
+USER = "user"
+LOG = "/tmp/bt-kbmouse.log"
+SPLIT_LOG = "/tmp/bt-kbmouse-split.log"
+DEBOUNCE = 1.5          # seconds the file must stay unchanged before the new settings are applied (a slider produces many writes)
+
+
+def log(msg):
+    with open(LOG, "a") as f:
+        f.write("%s %s\n" % (time.strftime("%H:%M:%S"), msg))
+
+
+def keyboard_present(part):
+    """Name of an input device whose name contains `part` and that is not one of the devices of the splitter."""
+    name = None
+    for line in open("/proc/bus/input/devices"):
+        if line.startswith("N: Name="):
+            name = line.split("=", 1)[1].strip().strip('"')
+        elif line.startswith("H: Handlers=") and name and part.lower() in name.lower() and "(keys)" not in name and "(pointer)" not in name:
+            if any(h.startswith("event") for h in line.split()):
+                return name
+    return None
+
+
+def kill_stale():
+    """Splitters of an earlier run (e.g. started by hand) would hold the device."""
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            cmd = open("/proc/%s/cmdline" % pid, "rb").read().replace(b"\0", b" ").decode("utf-8", "replace")
+        except OSError:
+            continue
+        if "btkbd-split" in cmd and "python" in cmd and int(pid) != os.getpid():
+            os.kill(int(pid), signal.SIGTERM)
+            log("stopped an old splitter, pid %s" % pid)
+
+
+def as_user(command, timeout=20):
+    """Runs a command as the user of the X session; returns the exit code."""
+    r = subprocess.run(["su", USER, "-c", "cd %s && export DISPLAY=:0 && %s" % (DIR, command)], capture_output=True, text=True, timeout=timeout)
+    if r.returncode:
+        log("failed (%d): %s :: %s" % (r.returncode, command, (r.stdout + r.stderr).strip()[-200:]))
+    return r.returncode
+
+
+class Service:
+    def __init__(self):
+        self.proc = None
+        self.cfg = C.load()
+        self.mtime = self.seen_mtime = self.mtime_at = 0
+        self.restart_key = None
+        self.live_key = None
+        self.pending = []              # steps for the X session that did not work yet (X not up, device not registered)
+        self.next_try = 0
+        self.stop = False
+
+    # ---- settings ----
+    def reload(self):
+        try:
+            m = os.stat(C.PATH).st_mtime
+        except OSError:
+            m = 0
+        if m != self.seen_mtime:
+            self.seen_mtime, self.mtime_at = m, time.time()
+        elif m != self.mtime and time.time() - self.mtime_at >= DEBOUNCE:
+            self.mtime = m
+            self.cfg = C.load()
+            log("settings loaded")
+
+    def restart_settings(self):      # the splitter has to be started again when one of these changes
+        c = self.cfg
+        return (C.yes(c, "enabled"), c["device"], c["layout"], C.scroll_step(c), C.yes(c, "scroll_invert"))
+
+    def live_settings(self):         # applied in the X session without restarting anything
+        c = self.cfg
+        return (C.decel(c), C.yes(c, "cursor"), C.number(c, "cursor_size", 1, 3))
+
+    # ---- the splitter ----
+    def start_splitter(self):
+        c = self.cfg
+        args = [PY, os.path.join(DIR, "btkbd-split.py"), "--layout", c["layout"], "--pointer", "rel", "--scroll-step", str(C.scroll_step(c))]
+        if C.yes(c, "scroll_invert"):
+            args.append("--scroll-invert")
+        args.append(c["device"])
+        out = open(SPLIT_LOG, "w")
+        self.proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
+        log("splitter started, pid %d: %s" % (self.proc.pid, " ".join(args[2:])))
+        self.pending = ["keymap", "accel", "cursor"]
+        self.next_try = time.time() + 5          # the new devices have to reach the X server first
+
+    def stop_splitter(self):
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+        self.proc = None
+        self.pending = []
+
+    # ---- X session ----
+    def apply_step(self, step):
+        c = self.cfg
+        if step == "keymap":
+            return as_user("%s btkbd-keymap.py --layout %s" % (PY, c["layout"])) == 0 if c["layout"] != "none" else True
+        if step == "accel":
+            ok = as_user('%s btkbd-accel.py set "(pointer)" "Device Accel Profile" 3' % PY) == 0
+            return as_user('%s btkbd-accel.py setf "(pointer)" "Device Accel Constant Deceleration" %s' % (PY, C.decel(c))) == 0 and ok
+        if step == "cursor":
+            if C.yes(c, "cursor"):
+                return as_user("%s btkbd-cursor.py show %d" % (PY, C.number(c, "cursor_size", 1, 3))) == 0
+            return as_user("%s btkbd-cursor.py hide" % PY) == 0
+        return True
+
+    def run_pending(self):
+        if self.pending and time.time() >= self.next_try:
+            step = self.pending[0]
+            if self.apply_step(step):
+                self.pending.pop(0)
+                self.tries = 0
+            else:
+                self.tries = getattr(self, "tries", 0) + 1
+                self.next_try = time.time() + 5
+                if self.tries >= 8:
+                    log("giving up on %s" % step)
+                    self.pending.pop(0)
+                    self.tries = 0
+
+    # ---- one round ----
+    def status(self, state, name=""):
+        try:
+            with open(C.STATUS, "w") as f:
+                f.write("state=%s\ndevice=%s\nlayout=%s\n" % (state, name or "", self.cfg["layout"]))
+            os.chmod(C.STATUS, 0o644)
+        except OSError:
+            pass
+
+    def tick(self):
+        self.reload()
+        if self.proc and self.proc.poll() is not None:
+            log("splitter ended (code %s): the keyboard went away" % self.proc.returncode)
+            self.proc = None
+            self.pending = []
+        enabled = C.yes(self.cfg, "enabled")
+        name = keyboard_present(self.cfg["device"]) if enabled else None
+        if self.proc and (not enabled or self.restart_settings() != self.restart_key):
+            log("restarting the splitter (settings or the service was switched off)")
+            self.stop_splitter()
+            time.sleep(1)
+        if not self.proc and name:
+            self.restart_key = self.restart_settings()
+            self.live_key = self.live_settings()
+            self.start_splitter()
+        elif self.proc and self.live_settings() != self.live_key:
+            self.live_key = self.live_settings()
+            self.pending = [s for s in ("accel", "cursor") if s not in self.pending] + self.pending
+            self.next_try = 0
+            log("pointer or cursor settings changed")
+        self.run_pending()
+        self.status("running" if self.proc else ("waiting" if enabled else "off"), name)
+
+    def run(self):
+        signal.signal(signal.SIGTERM, lambda *a: setattr(self, "stop", True))
+        signal.signal(signal.SIGINT, lambda *a: setattr(self, "stop", True))
+        kill_stale()
+        subprocess.run(["modprobe", "hidp"], capture_output=True)         # the Bluetooth HID driver (loads hid, too)
+        log("bt-kbmouse service started")
+        while not self.stop:
+            try:
+                self.tick()
+            except Exception as e:
+                log("error: %r" % (e,))
+            time.sleep(1)
+        self.stop_splitter()
+        self.status("off")
+        log("bt-kbmouse service stopped")
+
+
+if __name__ == "__main__":
+    Service().run()
