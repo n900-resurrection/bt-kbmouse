@@ -11,6 +11,7 @@ except ImportError:                       # in the repository: the copy of hildo
     import hildonlite as hl
 import bt_kbmouse_conf as C
 
+SIZE_NAMES = ["Small", "Medium", "Large"]
 LAYOUT_NAMES = {"cz": "Czech (QWERTZ)", "us": "US (QWERTY)", "none": "As the keyboard sends"}
 
 
@@ -56,7 +57,7 @@ def main():
             cfg["scroll_speed"] = str(int(round(scroll.get_value())))
             cfg["scroll_invert"] = "yes" if invert.get_active() else "no"
             cfg["cursor"] = "yes" if cursor.get_active() else "no"
-            cfg["cursor_size"] = str(int(round(size.get_value())))
+            cfg["cursor_size"] = str(size.get_active() + 1)
             try:
                 C.save(cfg)
             except OSError as e:
@@ -69,15 +70,8 @@ def main():
     status = box.add(hl.Label("", markup=True, wrap=True))
     enabled = box.add(hl.CheckButton("Use the Bluetooth keyboard", C.yes(cfg, "enabled"), save_soon))
 
-    def layout_button():
-        return LAYOUT_NAMES.get(cfg["layout"], cfg["layout"])
-
-    def next_layout(_b):
-        i = C.LAYOUTS.index(cfg["layout"]) if cfg["layout"] in C.LAYOUTS else 0
-        cfg["layout"] = C.LAYOUTS[(i + 1) % len(C.LAYOUTS)]
-        layout.set_value(layout_button())
-        save_soon()
-    layout = box.add(hl.Button("Keyboard layout", layout_button(), next_layout))
+    layout = box.add(hl.PickerButton("Keyboard layout", [LAYOUT_NAMES[k] for k in C.LAYOUTS],
+                                     C.LAYOUTS.index(cfg["layout"]) if cfg["layout"] in C.LAYOUTS else 0, lambda w: (cfg.__setitem__("layout", C.LAYOUTS[w.get_active()]), save_soon())))
 
     box.add(hl.Label("Pointer speed (TrackPoint)", xalign=0.0))
     speed = box.add(hl.Scale(1, 10, 1, C.number(cfg, "pointer_speed", 1, 10), save_soon))
@@ -85,8 +79,7 @@ def main():
     scroll = box.add(hl.Scale(1, 10, 1, C.number(cfg, "scroll_speed", 1, 10), save_soon))
     invert = box.add(hl.CheckButton("Reverse the scrolling direction", C.yes(cfg, "scroll_invert"), save_soon))
     cursor = box.add(hl.CheckButton("Show the mouse pointer", C.yes(cfg, "cursor"), save_soon))
-    box.add(hl.Label("Pointer size", xalign=0.0))
-    size = box.add(hl.Scale(1, 3, 1, C.number(cfg, "cursor_size", 1, 3), save_soon))
+    size = box.add(hl.PickerButton("Pointer size", SIZE_NAMES, C.number(cfg, "cursor_size", 1, 3) - 1, save_soon))
     box.add(hl.Label("Changes are applied within a few seconds. Right button: most Hildon applications do not use it.", wrap=True, xalign=0.0))
 
     area = hl.PannableArea()
