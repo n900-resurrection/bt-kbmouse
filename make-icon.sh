@@ -3,6 +3,8 @@
 # The PNGs are committed; run this only to change the design.
 set -euo pipefail
 cd "$(dirname "$0")"
+# ImageMagick writes the creation time into the PNG: without these options every run changes the files although the picture is the same.
+convert() { command convert +set date:create +set date:modify -define png:exclude-chunk=date,time "$@"; }
 mkdir -p icons
 W='#f2f2f2'
 keys=()
