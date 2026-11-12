@@ -164,9 +164,11 @@ class Service:
             self.restart_key = self.restart_settings()
             self.live_key = self.live_settings()
             self.start_splitter()
-        elif self.proc and self.live_settings() != self.live_key:
+        elif self.live_settings() != getattr(self, "live_key", None):
+            # without the keyboard only the cursor can be applied (the pointer device does not exist)
             self.live_key = self.live_settings()
-            self.pending = [s for s in ("accel", "cursor") if s not in self.pending] + self.pending
+            steps = ("accel", "cursor") if self.proc else ("cursor",)
+            self.pending = [s for s in steps if s not in self.pending] + self.pending
             self.next_try = 0
             log("pointer or cursor settings changed")
         self.run_pending()
